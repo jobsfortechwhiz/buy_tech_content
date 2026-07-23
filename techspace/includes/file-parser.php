@@ -1,3 +1,4 @@
+
 <?php
 // ─── File Content Parser ─────────────────────────────────────────────────────
 
@@ -85,66 +86,86 @@ function parseUploadedFile(string $tmpPath, string $originalName): array {
 /**
  * Extract numbered entries from plain text.
  *
- * Recognised formats on a line by itself:
- *   1. text       1) text     (1) text
- *   1: text       1 - text    1  text   (number followed by space only)
+ * The uploaded file MUST contain items prefixed with a number followed by a
+ * dot at the start of a line, e.g.:
  *
- * Multi-line entries are also handled — if a line does NOT start with a
- * number it is appended to the previous entry (continuation line).
+ *   1. First item text (may span
+ *      multiple lines / paragraphs)
+ *   2. Second item text
+ *   ...
+ *   10. Multi-digit numbers are supported
+ *   11. ...
  *
- * Returns array of ['number' => int, 'content' => string] sorted by number.
+ * The content is split using "1.", "2.", "3." … as delimiters. Any text
+ * BEFORE the first "1." is discarded (headings, intro, etc.). Numbering is
+ * treated as sequential — the parser only accepts markers that continue the
+ * sequence (1, 2, 3, …). Stray digits inside an entry (e.g. "in 2020.") are
+ * therefore ignored.
+ *
+ * Returns array of ['number' => int, 'content' => string] in order 1..n.
  */
 function extractNumberedEntries(string $content): array {
-    $entries = [];
-    $lines   = preg_split('/\r?\n/', $content);
+    if ($content === '') return [];
 
-    $currentNum  = null;
-    $currentText = '';
+    // Normalise line endings so ^ / $ work predictably in multiline mode.
+    $content = preg_replace('/\r\n?/', "\n", $content);
 
-    foreach ($lines as $line) {
-        $line = trim($line);
-        if ($line === '') continue;
+    // Find every candidate marker: "N." at the start of a line
+    // (optionally indented) followed by whitespace.
+    //   ^\s*      → optional leading whitespace on the line
+    //   (\d{1,4}) → 1-to-4 digit number (supports 1 … 9999)
+    //   \.        → literal dot
+    //   \s+       → at least one whitespace char before the content
+    if (!preg_match_all(
+        '/^[ \t]*(\d{1,4})\.[ \t]+/m',
+        $content,
+        $matches,
+        PREG_OFFSET_CAPTURE
+    )) {
+        return [];
+    }
 
-        // Does this line open a new numbered entry?
-        // Pattern covers:  1.  1)  1:  (1)  1 -  1  <text>
-        if (preg_match(
-            '/^(?:\()?(\d{1,3})(?:\))?(?:[.):\-]|\s)\s*(.*)$/u',
-            $line,
-            $m
-        )) {
-            // Save previous entry
-            if ($currentNum !== null && $currentText !== '') {
-                _saveEntry($entries, $currentNum, $currentText);
-            }
-            $currentNum  = (int) $m[1];
-            $currentText = trim($m[2]);
-        } else {
-            // Continuation line — append to current entry
-            if ($currentNum !== null) {
-                $currentText .= ' ' . $line;
-            }
-            // (Lines before any numbered entry are ignored)
+    // Keep only sequential markers starting at 1 → 2 → 3 → …
+    // This ignores duplicate numbers and stray "3." that may appear
+    // inside an entry's body.
+    $selected = [];
+    $expected = 1;
+    foreach ($matches[0] as $i => $full) {
+        $num = (int) $matches[1][$i][0];
+        if ($num === $expected) {
+            $selected[] = [
+                'offset' => $full[1],
+                'length' => strlen($full[0]),
+                'number' => $num,
+            ];
+            $expected++;
         }
     }
 
-    // Flush last entry
-    if ($currentNum !== null && $currentText !== '') {
-        _saveEntry($entries, $currentNum, $currentText);
-    }
+    if (!$selected) return [];
 
-    ksort($entries);
-
+    // Slice the content between consecutive markers → one entry per row.
     $result = [];
-    foreach ($entries as $num => $text) {
-        $result[] = ['number' => $num, 'content' => $text];
-    }
-    return $result;
-}
+    $total  = count($selected);
+    for ($i = 0; $i < $total; $i++) {
+        $start = $selected[$i]['offset'] + $selected[$i]['length'];
+        $end   = ($i + 1 < $total)
+            ? $selected[$i + 1]['offset']
+            : strlen($content);
 
-/** Internal: add/merge an entry keeping the longer version. */
-function _saveEntry(array &$entries, int $num, string $text): void {
-    if ($num <= 0 || $text === '') return;
-    if (!isset($entries[$num]) || strlen($text) > strlen($entries[$num])) {
-        $entries[$num] = $text;
+        $text = substr($content, $start, $end - $start);
+
+        // Collapse internal whitespace (multi-line entries become one line)
+        $text = preg_replace('/\s+/', ' ', $text);
+        $text = trim($text);
+
+        if ($text !== '') {
+            $result[] = [
+                'number'  => $selected[$i]['number'],
+                'content' => $text,
+            ];
+        }
     }
+
+    return $result;
 }
