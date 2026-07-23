@@ -17,18 +17,30 @@ $docs = $db->query('SELECT id, title, content FROM documents ORDER BY id')->fetc
 $log  = [];
 
 foreach ($docs as $doc) {
-    $db->prepare('DELETE FROM entries WHERE document_id = ?')->execute([$doc['id']]);
     $entries = extractNumberedEntries($doc['content']);
-    $ins     = $db->prepare(
-        'INSERT INTO entries (document_id, entry_number, content, created_at) VALUES (?, ?, ?, NOW())'
-    );
-    foreach ($entries as $e) {
-        $ins->execute([$doc['id'], $e['number'], $e['content']]);
+    $inserted = 0;
+
+    $db->beginTransaction();
+    try {
+        $db->prepare('DELETE FROM entries WHERE document_id = ?')
+           ->execute([$doc['id']]);
+
+        if ($entries) {
+            $ins = $db->prepare(
+                'INSERT INTO entries (document_id, entry_number, content, created_at)
+                 VALUES (?, ?, ?, NOW())'
+            );
+            foreach ($entries as $e) {
+                $ins->execute([$doc['id'], $e['number'], $e['content']]);
+                $inserted++;
+            }
+        }
+        $db->commit();
+        $log[] = ['doc' => $doc['title'], 'entries' => $inserted, 'error' => null];
+    } catch (Throwable $ex) {
+        $db->rollBack();
+        $log[] = ['doc' => $doc['title'], 'entries' => 0, 'error' => $ex->getMessage()];
     }
-    $log[] = [
-        'doc'     => $doc['title'],
-        'entries' => count($entries),
-    ];
 }
 ?>
 <!DOCTYPE html>
@@ -54,7 +66,9 @@ foreach ($docs as $doc) {
     <div class="row">
       <span class="num"><?= $l['entries'] ?></span>
       <span><?= htmlspecialchars($l['doc']) ?> &mdash;
-        <?php if ($l['entries']): ?>
+        <?php if (!empty($l['error'])): ?>
+          <span class="warn">Error: <?= htmlspecialchars($l['error']) ?></span>
+        <?php elseif ($l['entries']): ?>
           <span class="ok"><?= $l['entries'] ?> entries extracted</span>
         <?php else: ?>
           <span class="warn">0 numbered entries found</span>
